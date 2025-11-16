@@ -393,7 +393,7 @@ public class BuildingResourceRouting : MonoBehaviour
 
 
     /// <summary>
-    /// Ищет ближайший склад (возвращает как IResourceProvider и IResourceReceiver одновременно)
+    /// ✅ ОБНОВЛЕНО: Ищет ближайший склад с проверкой дорог и балансировкой нагрузки
     /// </summary>
     private Warehouse FindNearestWarehouse()
     {
@@ -405,20 +405,157 @@ public class BuildingResourceRouting : MonoBehaviour
             return null;
         }
 
-        Warehouse nearest = null;
-        float minDistance = float.MaxValue;
+        Debug.Log($"[Routing] {gameObject.name}: Найдено {warehouses.Length} складов. Проверяю доступность по дорогам...");
+
+        // Проверяем доступность дорог
+        if (_gridSystem == null || _roadManager == null || _identity == null)
+        {
+            Debug.LogWarning($"[Routing] {gameObject.name}: Системы не инициализированы, выбираю склад с балансировкой по прямой");
+            return FindBalancedWarehouseByDistance(warehouses);
+        }
+
+        var roadGraph = _roadManager.GetRoadGraph();
+        if (roadGraph == null || roadGraph.Count == 0)
+        {
+            Debug.LogWarning($"[Routing] {gameObject.name}: Граф дорог пуст, выбираю склад с балансировкой по прямой");
+            return FindBalancedWarehouseByDistance(warehouses);
+        }
+
+        // Находим наши точки доступа к дорогам
+        var myAccessPoints = LogisticsPathfinder.FindAllRoadAccess(_identity.rootGridPosition, _gridSystem, roadGraph);
+
+        if (myAccessPoints.Count == 0)
+        {
+            Debug.LogWarning($"[Routing] {gameObject.name}: У меня нет доступа к дорогам!");
+            return null;
+        }
+
+        // Рассчитываем расстояния от нас до всех точек дорог
+        var distancesFromMe = LogisticsPathfinder.Distances_BFS_Multi(myAccessPoints, 1000, roadGraph);
+
+        // ✅ БАЛАНСИРОВКА СКЛАДОВ:
+        // Собираем информацию о каждом складе: расстояние + нагрузка
+        var warehouseInfo = new System.Collections.Generic.List<(Warehouse warehouse, int distance, int producerCount)>();
+
+        foreach (var wh in warehouses)
+        {
+            var whIdentity = wh.GetComponent<BuildingIdentity>();
+            if (whIdentity == null)
+                continue;
+
+            var whAccessPoints = LogisticsPathfinder.FindAllRoadAccess(whIdentity.rootGridPosition, _gridSystem, roadGraph);
+
+            // Находим минимальное расстояние до этого склада
+            int minDistToWarehouse = int.MaxValue;
+            foreach (var accessPoint in whAccessPoints)
+            {
+                if (distancesFromMe.TryGetValue(accessPoint, out int dist) && dist < minDistToWarehouse)
+                {
+                    minDistToWarehouse = dist;
+                }
+            }
+
+            // Если склад недостижим по дорогам - пропускаем
+            if (minDistToWarehouse == int.MaxValue)
+            {
+                Debug.LogWarning($"[Routing] {gameObject.name}: Склад {wh.name} на {whIdentity.rootGridPosition} недостижим по дорогам!");
+                continue;
+            }
+
+            // Подсчитываем нагрузку (сколько производителей уже используют этот склад)
+            int producerCount = CountProducersForWarehouse(wh);
+
+            warehouseInfo.Add((wh, minDistToWarehouse, producerCount));
+
+            Debug.Log($"[Routing] {gameObject.name}: Склад {wh.name} - дистанция: {minDistToWarehouse}, производителей: {producerCount}");
+        }
+
+        if (warehouseInfo.Count == 0)
+        {
+            Debug.LogWarning($"[Routing] {gameObject.name}: Склады найдены, но нет дороги к ним!");
+            return null;
+        }
+
+        // ✅ ВЫБОР С БАЛАНСИРОВКОЙ:
+        // Сортируем: сначала по нагрузке (меньше = лучше), затем по расстоянию (ближе = лучше)
+        warehouseInfo.Sort((a, b) =>
+        {
+            // Приоритет 1: Меньше нагрузка
+            int loadComparison = a.producerCount.CompareTo(b.producerCount);
+            if (loadComparison != 0)
+                return loadComparison;
+
+            // Приоритет 2: Меньше расстояние
+            return a.distance.CompareTo(b.distance);
+        });
+
+        var bestWarehouse = warehouseInfo[0];
+
+        Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН склад: {bestWarehouse.warehouse.name} (дистанция: {bestWarehouse.distance}, нагрузка: {bestWarehouse.producerCount} производителей)");
+
+        return bestWarehouse.warehouse;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Подсчитывает, сколько производителей уже используют данный склад как outputDestination
+    /// </summary>
+    private int CountProducersForWarehouse(Warehouse warehouse)
+    {
+        int count = 0;
+
+        // Находим все здания с маршрутизацией
+        BuildingResourceRouting[] allRoutings = FindObjectsByType<BuildingResourceRouting>(FindObjectsSortMode.None);
+
+        foreach (var routing in allRoutings)
+        {
+            // Пропускаем себя
+            if (routing == this)
+                continue;
+
+            // Проверяем, использует ли это здание наш склад как получатель Output
+            if (routing.outputDestination == warehouse)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Выбирает склад с балансировкой по прямому расстоянию (fallback без дорог)
+    /// </summary>
+    private Warehouse FindBalancedWarehouseByDistance(Warehouse[] warehouses)
+    {
+        // Собираем информацию: склад + расстояние + нагрузка
+        var warehouseInfo = new System.Collections.Generic.List<(Warehouse warehouse, float distance, int producerCount)>();
 
         foreach (var wh in warehouses)
         {
             float dist = Vector3.Distance(transform.position, wh.transform.position);
-            if (dist < minDistance)
-            {
-                minDistance = dist;
-                nearest = wh;
-            }
+            int producerCount = CountProducersForWarehouse(wh);
+
+            warehouseInfo.Add((wh, dist, producerCount));
         }
 
-        return nearest;
+        // Сортируем: сначала по нагрузке, затем по расстоянию
+        warehouseInfo.Sort((a, b) =>
+        {
+            int loadComparison = a.producerCount.CompareTo(b.producerCount);
+            if (loadComparison != 0)
+                return loadComparison;
+
+            return a.distance.CompareTo(b.distance);
+        });
+
+        if (warehouseInfo.Count > 0)
+        {
+            var best = warehouseInfo[0];
+            Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН склад (по прямой) {best.warehouse.name} - расстояние: {best.distance:F1}, нагрузка: {best.producerCount}");
+            return best.warehouse;
+        }
+
+        return null;
     }
     
     /// <summary>
