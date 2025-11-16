@@ -343,7 +343,7 @@ public class BuildingResourceRouting : MonoBehaviour
                 continue;
 
             // Проверяем, использует ли это здание нашего производителя как источник Input
-            if (routing.inputSource == producer)
+            if (ReferenceEquals(routing.inputSource, producer))
             {
                 count++;
             }
@@ -513,7 +513,7 @@ public class BuildingResourceRouting : MonoBehaviour
                 continue;
 
             // Проверяем, использует ли это здание наш склад как получатель Output
-            if (routing.outputDestination == warehouse)
+            if (ReferenceEquals(routing.outputDestination, warehouse))
             {
                 count++;
             }
