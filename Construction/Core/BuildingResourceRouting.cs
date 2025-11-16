@@ -75,14 +75,15 @@ public class BuildingResourceRouting : MonoBehaviour
     }
     void Update()
     {
-        // ✅ АВТООБНОВЛЕНИЕ: Если маршруты не настроены, повторяем проверку каждые N секунд
-        // Это решает проблему, когда здание строится ДО склада
-        if (!IsConfigured())
+        _retryTimer += Time.deltaTime;
+
+        if (_retryTimer >= _retryInterval)
         {
-            _retryTimer += Time.deltaTime;
-            if (_retryTimer >= _retryInterval)
+            _retryTimer = 0f;
+
+            // ✅ АВТООБНОВЛЕНИЕ 1: Если маршруты не настроены, повторяем проверку
+            if (!IsConfigured())
             {
-                _retryTimer = 0f;
                 Debug.Log($"[Routing] {gameObject.name}: Маршруты не настроены, повторная проверка...");
                 RefreshRoutes();
                 // Уведомляем ResourceProducer об изменении
@@ -90,6 +91,27 @@ public class BuildingResourceRouting : MonoBehaviour
                 if (producer != null)
                 {
                     producer.RefreshWarehouseAccess();
+                }
+            }
+            // ✅ НОВОЕ: АВТООБНОВЛЕНИЕ 2: Если Output destination заполнен - ищем другого потребителя
+            else if (_preferDirectDelivery && outputDestination != null && outputDestinationTransform == null)
+            {
+                // Проверяем только автоматически выбранные маршруты (не ручные)
+                if (outputDestination is BuildingInputInventory consumer)
+                {
+                    var outputInv = GetComponent<BuildingOutputInventory>();
+                    if (outputInv != null)
+                    {
+                        ResourceType producedType = outputInv.GetProvidedResourceType();
+                        float fillRatio = GetConsumerFillRatio(consumer, producedType);
+
+                        // Если потребитель заполнен >= 90%, переключаемся на другого
+                        if (fillRatio >= 0.9f)
+                        {
+                            Debug.Log($"[Routing] {gameObject.name}: Output destination заполнен на {fillRatio*100:F0}%, ищу другого потребителя...");
+                            RefreshRoutes();
+                        }
+                    }
                 }
             }
         }
@@ -366,7 +388,7 @@ public class BuildingResourceRouting : MonoBehaviour
                 continue;
 
             // Проверяем, использует ли это здание нашего производителя как источник Input
-            if (routing.inputSource == producer)
+            if ((object)routing.inputSource == (object)producer)
             {
                 count++;
             }
@@ -508,8 +530,8 @@ public class BuildingResourceRouting : MonoBehaviour
         var distancesFromMe = LogisticsPathfinder.Distances_BFS_Multi(myAccessPoints, 1000, roadGraph);
 
         // ✅ НОВАЯ ЛОГИКА БАЛАНСИРОВКИ:
-        // Собираем информацию о каждом потребителе: расстояние + нагрузка
-        var consumerInfo = new System.Collections.Generic.List<(IResourceReceiver receiver, int distance, int supplierCount)>();
+        // Собираем информацию о каждом потребителе: расстояние + нагрузка + заполнение склада
+        var consumerInfo = new System.Collections.Generic.List<(IResourceReceiver receiver, int distance, int supplierCount, float fillRatio)>();
 
         foreach (var consumer in matchingConsumers)
         {
@@ -536,9 +558,12 @@ public class BuildingResourceRouting : MonoBehaviour
             // Подсчитываем нагрузку (сколько поставщиков уже подключены к этому потребителю)
             int supplierCount = CountSuppliersForConsumer(consumer);
 
-            consumerInfo.Add((consumer, minDistToConsumer, supplierCount));
+            // ✅ НОВОЕ: Проверяем заполнение склада потребителя для нашего ресурса
+            float fillRatio = GetConsumerFillRatio(consumer, producedType);
 
-            Debug.Log($"[Routing] {gameObject.name}: Потребитель {consumer.name} - дистанция: {minDistToConsumer}, поставщиков: {supplierCount}");
+            consumerInfo.Add((consumer, minDistToConsumer, supplierCount, fillRatio));
+
+            Debug.Log($"[Routing] {gameObject.name}: Потребитель {consumer.name} - дистанция: {minDistToConsumer}, поставщиков: {supplierCount}, заполнение: {fillRatio*100:F0}%");
         }
 
         if (consumerInfo.Count == 0)
@@ -548,15 +573,20 @@ public class BuildingResourceRouting : MonoBehaviour
         }
 
         // ✅ ВЫБОР С БАЛАНСИРОВКОЙ:
-        // Сортируем: сначала по нагрузке (меньше = лучше), затем по расстоянию (ближе = лучше)
+        // Сортируем: сначала по заполнению (меньше = лучше), затем по нагрузке, затем по расстоянию
         consumerInfo.Sort((a, b) =>
         {
-            // Приоритет 1: Меньше нагрузка
+            // Приоритет 1: Меньше заполнение (самое важное!)
+            int fillComparison = a.fillRatio.CompareTo(b.fillRatio);
+            if (fillComparison != 0)
+                return fillComparison;
+
+            // Приоритет 2: Меньше нагрузка (количество поставщиков)
             int loadComparison = a.supplierCount.CompareTo(b.supplierCount);
             if (loadComparison != 0)
                 return loadComparison;
 
-            // Приоритет 2: Меньше расстояние
+            // Приоритет 3: Меньше расстояние
             return a.distance.CompareTo(b.distance);
         });
 
@@ -564,10 +594,33 @@ public class BuildingResourceRouting : MonoBehaviour
 
         if (bestConsumer.receiver is MonoBehaviour mb)
         {
-            Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН потребитель {producedType}: {mb.name} (дистанция: {bestConsumer.distance}, нагрузка: {bestConsumer.supplierCount} поставщиков)");
+            Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН потребитель {producedType}: {mb.name} (дистанция: {bestConsumer.distance}, поставщиков: {bestConsumer.supplierCount}, заполнение: {bestConsumer.fillRatio*100:F0}%)");
         }
 
         return bestConsumer.receiver;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Получает процент заполнения склада потребителя для указанного ресурса
+    /// </summary>
+    private float GetConsumerFillRatio(BuildingInputInventory consumer, ResourceType resourceType)
+    {
+        if (consumer == null || consumer.requiredResources == null)
+            return 1.0f; // Если нет данных - считаем заполненным
+
+        // Ищем слот с нужным ресурсом
+        foreach (var slot in consumer.requiredResources)
+        {
+            if (slot.resourceType == resourceType)
+            {
+                if (slot.maxAmount <= 0)
+                    return 1.0f; // Слот не настроен - считаем заполненным
+
+                return slot.currentAmount / slot.maxAmount;
+            }
+        }
+
+        return 1.0f; // Ресурс не найден - считаем заполненным
     }
 
     /// <summary>
@@ -587,7 +640,7 @@ public class BuildingResourceRouting : MonoBehaviour
                 continue;
 
             // Проверяем, использует ли это здание нашего потребителя как получатель Output
-            if (routing.outputDestination == consumer)
+            if ((object)routing.outputDestination == (object)consumer)
             {
                 count++;
             }
@@ -601,24 +654,40 @@ public class BuildingResourceRouting : MonoBehaviour
     /// </summary>
     private IResourceReceiver FindBalancedConsumerByDistance(System.Collections.Generic.List<BuildingInputInventory> consumers)
     {
-        // Собираем информацию: потребитель + расстояние + нагрузка
-        var consumerInfo = new System.Collections.Generic.List<(IResourceReceiver receiver, float distance, int supplierCount)>();
+        // Определяем, какой ресурс мы производим (для проверки заполнения)
+        var outputInv = GetComponent<BuildingOutputInventory>();
+        ResourceType producedType = ResourceType.None;
+        if (outputInv != null)
+        {
+            producedType = outputInv.GetProvidedResourceType();
+        }
+
+        // Собираем информацию: потребитель + расстояние + нагрузка + заполнение
+        var consumerInfo = new System.Collections.Generic.List<(IResourceReceiver receiver, float distance, int supplierCount, float fillRatio)>();
 
         foreach (var consumer in consumers)
         {
             float dist = Vector3.Distance(transform.position, consumer.transform.position);
             int supplierCount = CountSuppliersForConsumer(consumer);
+            float fillRatio = GetConsumerFillRatio(consumer, producedType);
 
-            consumerInfo.Add((consumer, dist, supplierCount));
+            consumerInfo.Add((consumer, dist, supplierCount, fillRatio));
         }
 
-        // Сортируем: сначала по нагрузке, затем по расстоянию
+        // Сортируем: сначала по заполнению, затем по нагрузке, затем по расстоянию
         consumerInfo.Sort((a, b) =>
         {
+            // Приоритет 1: Меньше заполнение
+            int fillComparison = a.fillRatio.CompareTo(b.fillRatio);
+            if (fillComparison != 0)
+                return fillComparison;
+
+            // Приоритет 2: Меньше нагрузка
             int loadComparison = a.supplierCount.CompareTo(b.supplierCount);
             if (loadComparison != 0)
                 return loadComparison;
 
+            // Приоритет 3: Меньше расстояние
             return a.distance.CompareTo(b.distance);
         });
 
@@ -627,7 +696,7 @@ public class BuildingResourceRouting : MonoBehaviour
             var best = consumerInfo[0];
             if (best.receiver is MonoBehaviour mb)
             {
-                Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН (по прямой) потребитель {mb.name} - расстояние: {best.distance:F1}, нагрузка: {best.supplierCount}");
+                Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН (по прямой) потребитель {mb.name} - расстояние: {best.distance:F1}, нагрузка: {best.supplierCount}, заполнение: {best.fillRatio*100:F0}%");
             }
             return best.receiver;
         }
@@ -756,7 +825,7 @@ public class BuildingResourceRouting : MonoBehaviour
                 continue;
 
             // Проверяем, использует ли это здание наш склад как получатель Output
-            if (routing.outputDestination == warehouse)
+            if ((object)routing.outputDestination == (object)warehouse)
             {
                 count++;
             }
