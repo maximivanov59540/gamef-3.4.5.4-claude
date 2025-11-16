@@ -888,7 +888,7 @@ public class CartAgent : MonoBehaviour
 
         if (endAccessPoints.Count == 0)
         {
-            Debug.LogWarning($"[CartAgent] {name}: Нет точек доступа к дороге у получателя {destinationCell}! Возможно, здание не подключено к дорожной сети.");
+            Debug.LogWarning($"[CartAgent] {name}: ❌ ПРОБЛЕМА: Нет точек доступа к дороге у получателя {destinationCell}! Здание не подключено к дорожной сети.");
             return false;
         }
 
@@ -897,23 +897,28 @@ public class CartAgent : MonoBehaviour
 
         Vector2Int bestEndCell = new Vector2Int(-1, -1);
         int minDistance = int.MaxValue;
+        int reachableCount = 0;
 
         foreach (var endCell in endAccessPoints)
         {
-            if (distances.TryGetValue(endCell, out int dist) && dist < minDistance)
+            if (distances.TryGetValue(endCell, out int dist))
             {
-                minDistance = dist;
-                bestEndCell = endCell;
+                reachableCount++;
+                if (dist < minDistance)
+                {
+                    minDistance = dist;
+                    bestEndCell = endCell;
+                }
             }
         }
 
         if (bestEndCell.x == -1)
         {
-            Debug.LogWarning($"[CartAgent] {name}: Нет достижимых точек доступа у получателя {destinationCell}! Проверьте подключение зданий к дорожной сети.");
+            Debug.LogWarning($"[CartAgent] {name}: ❌ ПРОБЛЕМА: Ни одна из {endAccessPoints.Count} точек доступа получателя {destinationCell} не достижима! Дороги отправителя и получателя НЕ соединены. Проверьте дорожную сеть.");
             return false;
         }
 
-        Debug.Log($"[CartAgent] {name}: Лучшая конечная точка: {bestEndCell}, расстояние: {minDistance}");
+        Debug.Log($"[CartAgent] {name}: ✅ Из {endAccessPoints.Count} точек доступа получателя {reachableCount} достижимы. Лучшая: {bestEndCell} (расстояние: {minDistance})");
 
         _currentPath = null;
         foreach(var startCell in startAccessPoints)
