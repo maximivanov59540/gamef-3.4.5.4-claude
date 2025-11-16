@@ -158,19 +158,29 @@ public class CartAgent : MonoBehaviour
         switch (_state)
         {
             case State.Idle:
-                // Ждём, пока накопится продукция
+                // Проверяем два варианта выхода из Idle:
+
+                // 1. Если есть продукция для отправки
                 if (_homeOutput != null && _homeOutput.HasAtLeastOneUnit())
                 {
                     SetState(State.LoadingOutput);
+                    break;
+                }
+
+                // 2. ✅ НОВОЕ: Если нужно сырье, но нет продукции - едем за сырьем напрямую
+                if (ShouldFetchInputDirectly())
+                {
+                    Debug.Log($"[CartAgent] {name}: Нет продукции, но нужно сырье. Еду за Input напрямую!");
+                    StartDirectInputFetch();
                 }
                 break;
-                
+
             case State.DeliveringOutput:
             case State.ReturningWithInput:
                 // В пути - просто едем
                 FollowPath();
                 break;
-                
+
             // Остальные состояния управляются корутинами
             // (LoadingOutput, UnloadingOutput, LoadingInput)
         }
@@ -463,6 +473,110 @@ public class CartAgent : MonoBehaviour
 
         return ResourceType.None;
     }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Проверяет, нужно ли ехать за Input напрямую (без отправки Output)
+    /// </summary>
+    private bool ShouldFetchInputDirectly()
+    {
+        // Не нужно, если нет компонента Input
+        if (_homeInput == null || _homeInput.requiredResources == null || _homeInput.requiredResources.Count == 0)
+            return false;
+
+        // Не нужно, если маршрут Input не настроен
+        if (_routing == null || _routing.inputSource == null)
+            return false;
+
+        // Проверяем, есть ли хотя бы один слот, который нуждается в пополнении
+        foreach (var slot in _homeInput.requiredResources)
+        {
+            if (slot.maxAmount <= 0) continue;
+
+            float fillRatio = slot.currentAmount / slot.maxAmount;
+
+            // Если слот заполнен меньше чем на 25% - срочно нужен Input!
+            if (fillRatio < 0.25f)
+            {
+                // Проверяем, есть ли этот ресурс в источнике
+                float availableAtSource = _routing.inputSource.GetAvailableAmount(slot.resourceType);
+                if (availableAtSource >= 1f)
+                {
+                    Debug.Log($"[CartAgent] {name}: ShouldFetchInputDirectly = TRUE. Слот {slot.resourceType} заполнен на {fillRatio*100:F0}%, в источнике доступно {availableAtSource}");
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Начинает поездку за Input напрямую (без отправки Output)
+    /// </summary>
+    private void StartDirectInputFetch()
+    {
+        IResourceProvider source = _routing.inputSource;
+
+        if (source == null)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: StartDirectInputFetch - inputSource == null!");
+            return;
+        }
+
+        Vector2Int sourcePosition = source.GetGridPosition();
+
+        Debug.Log($"[CartAgent] {name}: StartDirectInputFetch - ищу путь к источнику {sourcePosition}");
+
+        if (FindPathTo(sourcePosition))
+        {
+            Debug.Log($"[CartAgent] {name}: Путь к источнику Input найден, начинаю движение");
+            // Переходим в состояние "едем за Input"
+            // Используем ReturningWithInput, но без груза (просто едем к источнику)
+            _state = State.ReturningWithInput;
+            _cargoAmount = 0;
+        }
+        else
+        {
+            Debug.LogWarning($"[CartAgent] {name}: Не найден путь к источнику Input {sourcePosition}");
+        }
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Загружает Input при прямом прибытии к источнику (без разгрузки Output)
+    /// </summary>
+    private void TryLoadInputDirectly()
+    {
+        ResourceType neededType = GetNeededInputType();
+        if (neededType == ResourceType.None)
+        {
+            Debug.Log($"[CartAgent] {name}: TryLoadInputDirectly - не нужен Input (слоты заполнены), возвращаюсь домой пустым");
+            ReturnHomeEmpty();
+            return;
+        }
+
+        IResourceProvider source = _routing.inputSource;
+        if (source == null)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: TryLoadInputDirectly - inputSource == null!");
+            ReturnHomeEmpty();
+            return;
+        }
+
+        // Проверяем доступное количество
+        float availableAtSource = source.GetAvailableAmount(neededType);
+        Debug.Log($"[CartAgent] {name}: TryLoadInputDirectly - в источнике доступно {availableAtSource} {neededType}");
+
+        if (availableAtSource < 1f)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: TryLoadInputDirectly - в источнике недостаточно {neededType}, возвращаюсь домой пустым");
+            ReturnHomeEmpty();
+            return;
+        }
+
+        // Запускаем корутину загрузки Input
+        Debug.Log($"[CartAgent] {name}: TryLoadInputDirectly - начинаю загрузку {neededType}");
+        SetState(State.LoadingInput);
+    }
     
     /// <summary>
     /// Возвращает Output обратно в дом (если не смогли отвезти)
@@ -544,7 +658,7 @@ public class CartAgent : MonoBehaviour
         {
             // Приехали к получателю Output
             IResourceReceiver destination = _routing.outputDestination;
-            
+
             if (destination != null && destination.CanAcceptCart())
             {
                 SetState(State.UnloadingOutput);
@@ -558,16 +672,44 @@ public class CartAgent : MonoBehaviour
         }
         else if (_state == State.ReturningWithInput)
         {
-            // Вернулись домой
-            if (_cargoAmount > 0)
+            // ✅ НОВАЯ ЛОГИКА: Проверяем, где мы находимся
+            _gridSystem.GetXZ(transform.position, out int currentX, out int currentZ);
+            Vector2Int currentPos = new Vector2Int(currentX, currentZ);
+
+            // Проверяем, находимся ли мы дома (с некоторой погрешностью)
+            bool isAtHome = Vector2Int.Distance(currentPos, _homePosition) < 2f;
+
+            if (isAtHome)
             {
-                // С грузом - разгружаем
-                StartCoroutine(UnloadInputAtHomeCoroutine());
+                // Вернулись домой
+                if (_cargoAmount > 0)
+                {
+                    // С грузом - разгружаем
+                    Debug.Log($"[CartAgent] {name}: Приехал домой с {_cargoAmount} {_cargoType}, разгружаю");
+                    StartCoroutine(UnloadInputAtHomeCoroutine());
+                }
+                else
+                {
+                    // Пустые - в Idle
+                    Debug.Log($"[CartAgent] {name}: Приехал домой пустым, возвращаюсь в Idle");
+                    SetState(State.Idle);
+                }
             }
             else
             {
-                // Пустые - в Idle
-                SetState(State.Idle);
+                // ✅ НОВОЕ: Приехали к источнику Input (не домой)
+                if (_cargoAmount == 0)
+                {
+                    Debug.Log($"[CartAgent] {name}: Приехал к источнику Input, начинаю загрузку");
+                    // Пытаемся загрузить Input прямо здесь
+                    TryLoadInputDirectly();
+                }
+                else
+                {
+                    // Странная ситуация - груз есть, но мы не дома
+                    Debug.LogWarning($"[CartAgent] {name}: Приехал не домой с грузом {_cargoAmount} {_cargoType}! Возвращаюсь домой");
+                    ReturnHomeEmpty();
+                }
             }
         }
     }
