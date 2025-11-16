@@ -187,6 +187,7 @@ public class BuildingResourceRouting : MonoBehaviour
     
     /// <summary>
     /// ✅ НОВОЕ: Ищет ближайшего производителя нужного ресурса (с проверкой дорог)
+    /// ✅ БАЛАНСИРОВКА: Учитывает нагрузку на производителей (сколько потребителей уже подключены)
     /// </summary>
     private IResourceProvider FindNearestProducerForMyNeeds()
     {
@@ -239,15 +240,15 @@ public class BuildingResourceRouting : MonoBehaviour
         // 4. Проверяем доступность по дорогам и находим ближайшего
         if (_gridSystem == null || _roadManager == null || _identity == null)
         {
-            Debug.LogWarning($"[Routing] {gameObject.name}: Системы не инициализированы, выбираю ближайшего по расстоянию");
-            return FindNearestByDistance(matchingProducers);
+            Debug.LogWarning($"[Routing] {gameObject.name}: Системы не инициализированы, выбираю с балансировкой");
+            return FindBalancedProducerByDistance(matchingProducers);
         }
 
         var roadGraph = _roadManager.GetRoadGraph();
         if (roadGraph == null || roadGraph.Count == 0)
         {
-            Debug.LogWarning($"[Routing] {gameObject.name}: Граф дорог пуст, выбираю ближайшего по расстоянию");
-            return FindNearestByDistance(matchingProducers);
+            Debug.LogWarning($"[Routing] {gameObject.name}: Граф дорог пуст, выбираю с балансировкой");
+            return FindBalancedProducerByDistance(matchingProducers);
         }
 
         // Находим наши точки доступа к дорогам
@@ -262,9 +263,9 @@ public class BuildingResourceRouting : MonoBehaviour
         // Рассчитываем расстояния от нас до всех точек дорог
         var distancesFromMe = LogisticsPathfinder.Distances_BFS_Multi(myAccessPoints, 1000, roadGraph);
 
-        // Ищем ближайшего доступного производителя
-        IResourceProvider nearestProducer = null;
-        int minRoadDistance = int.MaxValue;
+        // ✅ НОВАЯ ЛОГИКА БАЛАНСИРОВКИ:
+        // Собираем информацию о каждом производителе: расстояние + нагрузка
+        var producerInfo = new System.Collections.Generic.List<(IResourceProvider provider, int distance, int consumerCount)>();
 
         foreach (var producer in matchingProducers)
         {
@@ -274,51 +275,122 @@ public class BuildingResourceRouting : MonoBehaviour
 
             var producerAccessPoints = LogisticsPathfinder.FindAllRoadAccess(producerIdentity.rootGridPosition, _gridSystem, roadGraph);
 
+            // Находим минимальное расстояние до этого производителя
+            int minDistToProducer = int.MaxValue;
             foreach (var accessPoint in producerAccessPoints)
             {
-                if (distancesFromMe.TryGetValue(accessPoint, out int dist) && dist < minRoadDistance)
+                if (distancesFromMe.TryGetValue(accessPoint, out int dist) && dist < minDistToProducer)
                 {
-                    minRoadDistance = dist;
-                    nearestProducer = producer;
+                    minDistToProducer = dist;
                 }
             }
+
+            // Если производитель недостижим - пропускаем
+            if (minDistToProducer == int.MaxValue)
+                continue;
+
+            // Подсчитываем нагрузку (сколько потребителей уже подключены к этому производителю)
+            int consumerCount = CountConsumersForProducer(producer);
+
+            producerInfo.Add((producer, minDistToProducer, consumerCount));
+
+            Debug.Log($"[Routing] {gameObject.name}: Производитель {producer.name} - дистанция: {minDistToProducer}, потребителей: {consumerCount}");
         }
 
-        if (nearestProducer != null)
-        {
-            if (nearestProducer is MonoBehaviour mb)
-            {
-                Debug.Log($"[Routing] {gameObject.name}: Нашёл производителя {neededType}: {mb.name} (дистанция по дороге: {minRoadDistance})");
-            }
-        }
-        else
+        if (producerInfo.Count == 0)
         {
             Debug.LogWarning($"[Routing] {gameObject.name}: Производители {neededType} найдены, но нет дороги к ним!");
+            return null;
         }
 
-        return nearestProducer;
+        // ✅ ВЫБОР С БАЛАНСИРОВКОЙ:
+        // Сортируем: сначала по нагрузке (меньше = лучше), затем по расстоянию (ближе = лучше)
+        producerInfo.Sort((a, b) =>
+        {
+            // Приоритет 1: Меньше нагрузка
+            int loadComparison = a.consumerCount.CompareTo(b.consumerCount);
+            if (loadComparison != 0)
+                return loadComparison;
+
+            // Приоритет 2: Меньше расстояние
+            return a.distance.CompareTo(b.distance);
+        });
+
+        var bestProducer = producerInfo[0];
+
+        if (bestProducer.provider is MonoBehaviour mb)
+        {
+            Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН производитель {neededType}: {mb.name} (дистанция: {bestProducer.distance}, нагрузка: {bestProducer.consumerCount} потребителей)");
+        }
+
+        return bestProducer.provider;
     }
 
     /// <summary>
-    /// Вспомогательный метод: находит ближайшего производителя по прямому расстоянию
+    /// ✅ НОВОЕ: Подсчитывает, сколько потребителей уже используют данного производителя как inputSource
     /// </summary>
-    private IResourceProvider FindNearestByDistance(System.Collections.Generic.List<BuildingOutputInventory> producers)
+    private int CountConsumersForProducer(BuildingOutputInventory producer)
     {
-        BuildingOutputInventory nearest = null;
-        float minDistance = float.MaxValue;
+        int count = 0;
+
+        // Находим все здания с маршрутизацией
+        BuildingResourceRouting[] allRoutings = FindObjectsByType<BuildingResourceRouting>(FindObjectsSortMode.None);
+
+        foreach (var routing in allRoutings)
+        {
+            // Пропускаем себя
+            if (routing == this)
+                continue;
+
+            // Проверяем, использует ли это здание нашего производителя как источник Input
+            if (routing.inputSource == producer)
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Выбирает производителя с балансировкой по прямому расстоянию (fallback)
+    /// </summary>
+    private IResourceProvider FindBalancedProducerByDistance(System.Collections.Generic.List<BuildingOutputInventory> producers)
+    {
+        // Собираем информацию: производитель + расстояние + нагрузка
+        var producerInfo = new System.Collections.Generic.List<(IResourceProvider provider, float distance, int consumerCount)>();
 
         foreach (var producer in producers)
         {
             float dist = Vector3.Distance(transform.position, producer.transform.position);
-            if (dist < minDistance)
-            {
-                minDistance = dist;
-                nearest = producer;
-            }
+            int consumerCount = CountConsumersForProducer(producer);
+
+            producerInfo.Add((producer, dist, consumerCount));
         }
 
-        return nearest;
+        // Сортируем: сначала по нагрузке, затем по расстоянию
+        producerInfo.Sort((a, b) =>
+        {
+            int loadComparison = a.consumerCount.CompareTo(b.consumerCount);
+            if (loadComparison != 0)
+                return loadComparison;
+
+            return a.distance.CompareTo(b.distance);
+        });
+
+        if (producerInfo.Count > 0)
+        {
+            var best = producerInfo[0];
+            if (best.provider is MonoBehaviour mb)
+            {
+                Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН (по прямой) {mb.name} - расстояние: {best.distance:F1}, нагрузка: {best.consumerCount}");
+            }
+            return best.provider;
+        }
+
+        return null;
     }
+
 
     /// <summary>
     /// Ищет ближайший склад (возвращает как IResourceProvider и IResourceReceiver одновременно)
