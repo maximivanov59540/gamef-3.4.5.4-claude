@@ -353,6 +353,15 @@ public class CartAgent : MonoBehaviour
             return;
         }
 
+        // ✅ НОВОЕ: Если источник - склад, но есть производитель, НЕ БРАТЬ со склада
+        bool isWarehouse = source is Warehouse;
+        if (isWarehouse && HasProducerForResource(neededType))
+        {
+            Debug.Log($"[CartAgent] {name}: НЕ беру {neededType} со склада! Найден производитель. Жду производства. Возвращаюсь домой пустым.");
+            ReturnHomeEmpty();
+            return;
+        }
+
         // Есть ли ресурс в источнике?
         float availableAmount = source.GetAvailableAmount(neededType);
         Debug.Log($"[CartAgent] {name}: В источнике {source.GetGridPosition()} доступно {availableAmount} {neededType}");
@@ -497,6 +506,20 @@ public class CartAgent : MonoBehaviour
             // Если слот заполнен меньше чем на 25% - срочно нужен Input!
             if (fillRatio < 0.25f)
             {
+                // ✅ НОВОЕ: Проверяем, является ли inputSource складом
+                bool isWarehouse = _routing.inputSource is Warehouse;
+
+                // ✅ ЕСЛИ ИСТОЧНИК - СКЛАД, проверяем наличие производителя
+                if (isWarehouse)
+                {
+                    // Проверяем, есть ли производитель для этого ресурса
+                    if (HasProducerForResource(slot.resourceType))
+                    {
+                        Debug.Log($"[CartAgent] {name}: НЕ еду на склад! Найден производитель {slot.resourceType}. Жду производства.");
+                        return false; // НЕ ЕХАТЬ - ЖДАТЬ производителя!
+                    }
+                }
+
                 // Проверяем, есть ли этот ресурс в источнике
                 float availableAtSource = _routing.inputSource.GetAvailableAmount(slot.resourceType);
                 if (availableAtSource >= 1f)
@@ -504,6 +527,31 @@ public class CartAgent : MonoBehaviour
                     Debug.Log($"[CartAgent] {name}: ShouldFetchInputDirectly = TRUE. Слот {slot.resourceType} заполнен на {fillRatio*100:F0}%, в источнике доступно {availableAtSource}");
                     return true;
                 }
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Проверяет, существует ли производитель для указанного ресурса
+    /// </summary>
+    private bool HasProducerForResource(ResourceType resourceType)
+    {
+        // Находим все здания с BuildingOutputInventory
+        BuildingOutputInventory[] allOutputs = FindObjectsByType<BuildingOutputInventory>(FindObjectsSortMode.None);
+
+        foreach (var output in allOutputs)
+        {
+            // Пропускаем себя
+            if (output.gameObject == _homeBase.gameObject)
+                continue;
+
+            // Проверяем тип производимого ресурса
+            if (output.outputResource.resourceType == resourceType)
+            {
+                Debug.Log($"[CartAgent] {name}: Найден производитель {resourceType}: {output.gameObject.name}");
+                return true;
             }
         }
 
