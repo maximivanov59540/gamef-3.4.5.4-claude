@@ -93,7 +93,7 @@ public class BuildingResourceRouting : MonoBehaviour
                     producer.RefreshWarehouseAccess();
                 }
             }
-            // ✅ НОВОЕ: АВТООБНОВЛЕНИЕ 2: Если Output destination заполнен - ищем другого потребителя
+            // ✅ НОВОЕ: АВТООБНОВЛЕНИЕ 2: Динамическое переключение между потребителями
             else if (_preferDirectDelivery && outputDestination != null && outputDestinationTransform == null)
             {
                 // Проверяем только автоматически выбранные маршруты (не ручные)
@@ -103,12 +103,18 @@ public class BuildingResourceRouting : MonoBehaviour
                     if (outputInv != null)
                     {
                         ResourceType producedType = outputInv.GetProvidedResourceType();
-                        float fillRatio = GetConsumerFillRatio(consumer, producedType);
 
-                        // Если потребитель заполнен >= 90%, переключаемся на другого
+                        // Причина 1: Потребитель заполнен >= 90%
+                        float fillRatio = GetConsumerFillRatio(consumer, producedType);
                         if (fillRatio >= 0.9f)
                         {
                             Debug.Log($"[Routing] {gameObject.name}: Output destination заполнен на {fillRatio*100:F0}%, ищу другого потребителя...");
+                            RefreshRoutes();
+                        }
+                        // Причина 2: Есть потребитель с меньшей нагрузкой (более справедливое распределение)
+                        else if (ShouldSwitchToLessLoadedConsumer(consumer, producedType))
+                        {
+                            Debug.Log($"[Routing] {gameObject.name}: Найден менее нагруженный потребитель, переключаюсь для балансировки...");
                             RefreshRoutes();
                         }
                     }
@@ -573,18 +579,20 @@ public class BuildingResourceRouting : MonoBehaviour
         }
 
         // ✅ ВЫБОР С БАЛАНСИРОВКОЙ:
-        // Сортируем: сначала по заполнению (меньше = лучше), затем по нагрузке, затем по расстоянию
+        // Сортируем: сначала по нагрузке (меньше = лучше), затем по заполнению, затем по расстоянию
         consumerInfo.Sort((a, b) =>
         {
-            // Приоритет 1: Меньше заполнение (самое важное!)
-            int fillComparison = a.fillRatio.CompareTo(b.fillRatio);
-            if (fillComparison != 0)
-                return fillComparison;
-
-            // Приоритет 2: Меньше нагрузка (количество поставщиков)
+            // Приоритет 1: Меньше нагрузка (количество поставщиков) - САМОЕ ВАЖНОЕ!
+            // Это обеспечивает равномерное распределение: 2 лесопилки → 2 плотницких (1:1)
             int loadComparison = a.supplierCount.CompareTo(b.supplierCount);
             if (loadComparison != 0)
                 return loadComparison;
+
+            // Приоритет 2: Меньше заполнение
+            // При равной нагрузке выбираем менее заполненного
+            int fillComparison = a.fillRatio.CompareTo(b.fillRatio);
+            if (fillComparison != 0)
+                return fillComparison;
 
             // Приоритет 3: Меньше расстояние
             return a.distance.CompareTo(b.distance);
@@ -594,10 +602,59 @@ public class BuildingResourceRouting : MonoBehaviour
 
         if (bestConsumer.receiver is MonoBehaviour mb)
         {
-            Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН потребитель {producedType}: {mb.name} (дистанция: {bestConsumer.distance}, поставщиков: {bestConsumer.supplierCount}, заполнение: {bestConsumer.fillRatio*100:F0}%)");
+            Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН потребитель {producedType}: {mb.name} (поставщиков: {bestConsumer.supplierCount}, заполнение: {bestConsumer.fillRatio*100:F0}%, дистанция: {bestConsumer.distance})");
         }
 
         return bestConsumer.receiver;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Проверяет, есть ли потребитель с меньшей нагрузкой для справедливого распределения
+    /// </summary>
+    private bool ShouldSwitchToLessLoadedConsumer(BuildingInputInventory currentConsumer, ResourceType producedType)
+    {
+        // Подсчитываем текущую нагрузку на потребителя
+        int currentLoad = CountSuppliersForConsumer(currentConsumer);
+
+        // Ищем всех потребителей данного ресурса
+        BuildingInputInventory[] allInputs = FindObjectsByType<BuildingInputInventory>(FindObjectsSortMode.None);
+
+        foreach (var input in allInputs)
+        {
+            // Пропускаем текущего потребителя
+            if (input == currentConsumer)
+                continue;
+
+            // Пропускаем себя
+            if (input.gameObject == gameObject)
+                continue;
+
+            // Проверяем, требует ли это здание наш ресурс
+            bool needsOurResource = false;
+            foreach (var slot in input.requiredResources)
+            {
+                if (slot.resourceType == producedType)
+                {
+                    needsOurResource = true;
+                    break;
+                }
+            }
+
+            if (!needsOurResource)
+                continue;
+
+            // Подсчитываем нагрузку на этого потребителя
+            int otherLoad = CountSuppliersForConsumer(input);
+
+            // Если нашли потребителя с нагрузкой хотя бы на 1 меньше - переключаемся
+            if (otherLoad < currentLoad)
+            {
+                Debug.Log($"[Routing] {gameObject.name}: Потребитель {input.name} имеет нагрузку {otherLoad}, текущий {currentConsumer.name} - {currentLoad}");
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -674,18 +731,18 @@ public class BuildingResourceRouting : MonoBehaviour
             consumerInfo.Add((consumer, dist, supplierCount, fillRatio));
         }
 
-        // Сортируем: сначала по заполнению, затем по нагрузке, затем по расстоянию
+        // Сортируем: сначала по нагрузке, затем по заполнению, затем по расстоянию
         consumerInfo.Sort((a, b) =>
         {
-            // Приоритет 1: Меньше заполнение
-            int fillComparison = a.fillRatio.CompareTo(b.fillRatio);
-            if (fillComparison != 0)
-                return fillComparison;
-
-            // Приоритет 2: Меньше нагрузка
+            // Приоритет 1: Меньше нагрузка (количество поставщиков)
             int loadComparison = a.supplierCount.CompareTo(b.supplierCount);
             if (loadComparison != 0)
                 return loadComparison;
+
+            // Приоритет 2: Меньше заполнение
+            int fillComparison = a.fillRatio.CompareTo(b.fillRatio);
+            if (fillComparison != 0)
+                return fillComparison;
 
             // Приоритет 3: Меньше расстояние
             return a.distance.CompareTo(b.distance);
@@ -696,7 +753,7 @@ public class BuildingResourceRouting : MonoBehaviour
             var best = consumerInfo[0];
             if (best.receiver is MonoBehaviour mb)
             {
-                Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН (по прямой) потребитель {mb.name} - расстояние: {best.distance:F1}, нагрузка: {best.supplierCount}, заполнение: {best.fillRatio*100:F0}%");
+                Debug.Log($"[Routing] {gameObject.name}: ✅ ВЫБРАН (по прямой) потребитель {mb.name} - поставщиков: {best.supplierCount}, заполнение: {best.fillRatio*100:F0}%, расстояние: {best.distance:F1}");
             }
             return best.receiver;
         }
