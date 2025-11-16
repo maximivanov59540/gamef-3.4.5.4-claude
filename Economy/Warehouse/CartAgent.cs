@@ -47,7 +47,7 @@ public class CartAgent : MonoBehaviour
     public float loadingTime = 2.0f;
     
     [Tooltip("Грузоподъёмность (сколько может везти за раз)")]
-    public float cargoCapacity = 100f;
+    public float cargoCapacity = 1f;
     
     // ════════════════════════════════════════════════════════════════
     //                    ССЫЛКИ НА "ДОМ"
