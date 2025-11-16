@@ -846,34 +846,58 @@ public class CartAgent : MonoBehaviour
     private bool FindPathTo(Vector2Int destinationCell)
     {
         var roadGraph = _roadManager.GetRoadGraph();
-        if (roadGraph == null || roadGraph.Count == 0) return false;
-        
+        if (roadGraph == null || roadGraph.Count == 0)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: RoadGraph пуст или null!");
+            return false;
+        }
+
         Vector2Int startBuildingCell;
         if (Vector3.Distance(transform.position, _homeBase.position) < 1f)
         {
             startBuildingCell = GetCurrentHomeCell();
-            if (startBuildingCell.x == -1) return false;
+            if (startBuildingCell.x == -1)
+            {
+                Debug.LogWarning($"[CartAgent] {name}: Не удалось получить координаты дома!");
+                return false;
+            }
         }
         else
         {
             _gridSystem.GetXZ(transform.position, out int sx, out int sz);
             startBuildingCell = new Vector2Int(sx, sz);
         }
-        
+
+        Debug.Log($"[CartAgent] {name}: Ищу путь от {startBuildingCell} к {destinationCell}");
+
         List<Vector2Int> startAccessPoints = LogisticsPathfinder.FindAllRoadAccess(
             startBuildingCell, _gridSystem, roadGraph);
-        if (startAccessPoints.Count == 0) return false;
-        
+
+        Debug.Log($"[CartAgent] {name}: Найдено {startAccessPoints.Count} точек доступа к дороге у отправителя: [{string.Join(", ", startAccessPoints)}]");
+
+        if (startAccessPoints.Count == 0)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: Нет точек доступа к дороге у отправителя {startBuildingCell}!");
+            return false;
+        }
+
         List<Vector2Int> endAccessPoints = LogisticsPathfinder.FindAllRoadAccess(
             destinationCell, _gridSystem, roadGraph);
-        if (endAccessPoints.Count == 0) return false;
-        
+
+        Debug.Log($"[CartAgent] {name}: Найдено {endAccessPoints.Count} точек доступа к дороге у получателя: [{string.Join(", ", endAccessPoints)}]");
+
+        if (endAccessPoints.Count == 0)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: Нет точек доступа к дороге у получателя {destinationCell}! Возможно, здание не подключено к дорожной сети.");
+            return false;
+        }
+
         var distances = LogisticsPathfinder.Distances_BFS_Multi(
             startAccessPoints, 1000, roadGraph);
-        
+
         Vector2Int bestEndCell = new Vector2Int(-1, -1);
         int minDistance = int.MaxValue;
-        
+
         foreach (var endCell in endAccessPoints)
         {
             if (distances.TryGetValue(endCell, out int dist) && dist < minDistance)
@@ -882,9 +906,15 @@ public class CartAgent : MonoBehaviour
                 bestEndCell = endCell;
             }
         }
-        
-        if (bestEndCell.x == -1) return false;
-        
+
+        if (bestEndCell.x == -1)
+        {
+            Debug.LogWarning($"[CartAgent] {name}: Нет достижимых точек доступа у получателя {destinationCell}! Проверьте подключение зданий к дорожной сети.");
+            return false;
+        }
+
+        Debug.Log($"[CartAgent] {name}: Лучшая конечная точка: {bestEndCell}, расстояние: {minDistance}");
+
         _currentPath = null;
         foreach(var startCell in startAccessPoints)
         {
@@ -892,23 +922,26 @@ public class CartAgent : MonoBehaviour
             if (path != null)
             {
                 _currentPath = path;
+                Debug.Log($"[CartAgent] {name}: Найден путь от {startCell} к {bestEndCell}, длина: {path.Count}");
                 break;
             }
         }
-        
+
         if (_currentPath != null && _currentPath.Count > 0)
         {
             if (startBuildingCell != _currentPath[0])
                 _currentPath.Insert(0, startBuildingCell);
-            
+
             if (destinationCell != _currentPath[_currentPath.Count - 1])
                 _currentPath.Add(destinationCell);
-            
+
             _pathIndex = 0;
             SetNewTargetNode();
+            Debug.Log($"[CartAgent] {name}: Полный путь построен, длина: {_currentPath.Count}");
             return true;
         }
-        
+
+        Debug.LogWarning($"[CartAgent] {name}: Не удалось построить путь от {startBuildingCell} к {destinationCell}!");
         return false;
     }
     

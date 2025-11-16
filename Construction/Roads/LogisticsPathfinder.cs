@@ -169,15 +169,19 @@ public static class LogisticsPathfinder
     // --- ⬇️ ⬇️ ⬇️ НАШ НОВЫЙ МЕТОД ⬇️ ⬇️ ⬇️ ---
     /// <summary>
     /// "УМНЫЙ" ПОИСК (Множественный): Находит ВСЕ клетки дорог у периметра здания.
+    /// Если не найдено дорог рядом, ищет в расширенном радиусе.
     /// </summary>
     public static List<Vector2Int> FindAllRoadAccess(Vector2Int buildingCell, GridSystem gridSystem, Dictionary<Vector2Int, List<Vector2Int>> graph)
     {
         var results = new List<Vector2Int>();
         var seen = new HashSet<Vector2Int>(); // Для защиты от дубликатов
 
+        Debug.Log($"[LogisticsPathfinder] FindAllRoadAccess для клетки {buildingCell}");
+
         // 1. Проверяем саму клетку (если здание 1х1 стоит прямо на дороге)
         if (graph.ContainsKey(buildingCell) && seen.Add(buildingCell))
         {
+            Debug.Log($"[LogisticsPathfinder] Сама клетка {buildingCell} является дорогой");
             results.Add(buildingCell);
         }
 
@@ -186,6 +190,7 @@ public static class LogisticsPathfinder
         // 2. Если это не здание (а просто точка), ищем в 4-х соседях
         if (identity == null)
         {
+            Debug.Log($"[LogisticsPathfinder] Клетка {buildingCell} не является зданием, ищу в 4-х соседях");
             Vector2Int[] neighbors = {
                 buildingCell + Vector2Int.up,
                 buildingCell + Vector2Int.down,
@@ -195,8 +200,20 @@ public static class LogisticsPathfinder
             foreach (var cell in neighbors)
             {
                 if (graph.ContainsKey(cell) && seen.Add(cell))
+                {
+                    Debug.Log($"[LogisticsPathfinder] Найдена дорога у соседа: {cell}");
                     results.Add(cell);
+                }
             }
+
+            // ✅ НОВОЕ: Если не найдено дорог рядом, ищем в расширенном радиусе
+            if (results.Count == 0)
+            {
+                Debug.Log($"[LogisticsPathfinder] Не найдено дорог рядом, ищу в расширенном радиусе...");
+                results = FindNearestRoads(buildingCell, graph, 5);
+            }
+
+            Debug.Log($"[LogisticsPathfinder] Найдено {results.Count} точек доступа для не-здания");
             return results; // Возвращаем то, что нашли (может быть пусто)
         }
 
@@ -204,33 +221,102 @@ public static class LogisticsPathfinder
         Vector2Int root = identity.rootGridPosition;
         Vector2Int size = identity.buildingData.size;
         float yRotation = identity.yRotation;
+
+        Debug.Log($"[LogisticsPathfinder] Здание: {identity.name}, root: {root}, size: {size}, rotation: {yRotation}");
+
         if (Mathf.Abs(yRotation - 90f) < 1f || Mathf.Abs(yRotation - 270f) < 1f)
         {
             size = new Vector2Int(size.y, size.x);
+            Debug.Log($"[LogisticsPathfinder] Здание повернуто, новый размер: {size}");
         }
 
         int minX = root.x - 1; int maxX = root.x + size.x;
         int minZ = root.y - 1; int maxZ = root.y + size.y;
 
+        Debug.Log($"[LogisticsPathfinder] Периметр здания: X от {minX} до {maxX}, Z от {minZ} до {maxZ}");
+
         for (int x = minX; x <= maxX; x++)
         {
             Vector2Int topCell = new Vector2Int(x, maxZ);
             if (graph.ContainsKey(topCell) && seen.Add(topCell))
+            {
+                Debug.Log($"[LogisticsPathfinder] Найдена дорога сверху: {topCell}");
                 results.Add(topCell);
+            }
 
             Vector2Int bottomCell = new Vector2Int(x, minZ);
             if (graph.ContainsKey(bottomCell) && seen.Add(bottomCell))
+            {
+                Debug.Log($"[LogisticsPathfinder] Найдена дорога снизу: {bottomCell}");
                 results.Add(bottomCell);
+            }
         }
         for (int z = minZ + 1; z < maxZ; z++)
         {
             Vector2Int leftCell = new Vector2Int(minX, z);
             if (graph.ContainsKey(leftCell) && seen.Add(leftCell))
+            {
+                Debug.Log($"[LogisticsPathfinder] Найдена дорога слева: {leftCell}");
                 results.Add(leftCell);
+            }
 
             Vector2Int rightCell = new Vector2Int(maxX, z);
             if (graph.ContainsKey(rightCell) && seen.Add(rightCell))
+            {
+                Debug.Log($"[LogisticsPathfinder] Найдена дорога справа: {rightCell}");
                 results.Add(rightCell);
+            }
+        }
+
+        // ✅ НОВОЕ: Если не найдено дорог у периметра здания, ищем в расширенном радиусе
+        if (results.Count == 0)
+        {
+            Debug.LogWarning($"[LogisticsPathfinder] Не найдено дорог у периметра здания! Ищу в расширенном радиусе...");
+            results = FindNearestRoads(buildingCell, graph, 5);
+        }
+
+        Debug.Log($"[LogisticsPathfinder] Найдено {results.Count} точек доступа для здания");
+        return results;
+    }
+
+    /// <summary>
+    /// ✅ НОВОЕ: Находит ближайшие дороги в указанном радиусе от точки
+    /// </summary>
+    private static List<Vector2Int> FindNearestRoads(Vector2Int center, Dictionary<Vector2Int, List<Vector2Int>> graph, int maxRadius)
+    {
+        var results = new List<Vector2Int>();
+
+        // Ищем по спирали от центра наружу
+        for (int radius = 1; radius <= maxRadius; radius++)
+        {
+            for (int x = center.x - radius; x <= center.x + radius; x++)
+            {
+                for (int z = center.y - radius; z <= center.y + radius; z++)
+                {
+                    // Проверяем только клетки на текущем радиусе (периметр квадрата)
+                    if (Mathf.Abs(x - center.x) == radius || Mathf.Abs(z - center.y) == radius)
+                    {
+                        Vector2Int cell = new Vector2Int(x, z);
+                        if (graph.ContainsKey(cell))
+                        {
+                            results.Add(cell);
+                            Debug.Log($"[LogisticsPathfinder] Найдена дорога на расстоянии {radius}: {cell}");
+                        }
+                    }
+                }
+            }
+
+            // Если нашли хотя бы одну дорогу на этом радиусе, останавливаемся
+            if (results.Count > 0)
+            {
+                Debug.Log($"[LogisticsPathfinder] Найдено {results.Count} дорог на расстоянии {radius} от {center}");
+                return results;
+            }
+        }
+
+        if (results.Count == 0)
+        {
+            Debug.LogWarning($"[LogisticsPathfinder] Не найдено дорог в радиусе {maxRadius} от {center}!");
         }
 
         return results;
